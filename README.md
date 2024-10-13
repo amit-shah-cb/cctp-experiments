@@ -58,3 +58,11 @@ ensure .env is set correctly:
 - run:
  ./node_modules/.bin/ts-node src/solana/receiveMessage.ts
 
+### Example Transactions
+
+burn: https://basescan.org/tx/0x32355a7d42887517aa35de79aa89babd8a8a5d8ae0ccbf61ae82fd5f997765e2
+fee: $0.001686
+claim: https://solscan.io/tx/5rxPHGkrpoDHodtdB9QxoC8bewguQyL6UbsXSpZ8EHVeaLDAjvuMakqxmfomUJTCWSe9AQPRRW9tTpaq8hysKMSc
+fee: $0.0007321
+
+total fee to move USDC: $0.001686
