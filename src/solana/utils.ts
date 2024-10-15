@@ -18,7 +18,7 @@
 
 import 'dotenv/config';
 import * as anchor from "@coral-xyz/anchor";
-import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
+import { AddressLookupTableProgram, Connection, Keypair, PublicKey, Transaction, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
 import { hexlify } from 'ethers';
 import axios from 'axios';
 import { bs58 } from '@coral-xyz/anchor/dist/cjs/utils/bytes';
@@ -29,7 +29,7 @@ import * as bip39 from "bip39"
 import * as ed25519 from "ed25519-hd-key"
 import * as MessageTransmitterIDL  from './target/idl/message_transmitter.json';
 import * as TokenMessengerMinterIDL  from './target/idl/token_messenger_minter.json';
-
+import * as spl from '@solana/spl-token';
 
 export const SOLANA_SRC_DOMAIN_ID = 5;
 export const SOLANA_USDC_ADDRESS = process.env.SOLANA_USDC_ADDRESS ?? "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
@@ -41,7 +41,7 @@ export interface FindProgramAddressResponse {
 
 // Configure client to use the provider and return it.
 // Must set ANCHOR_WALLET (solana keypair path) and ANCHOR_PROVIDER_URL (node URL) env vars
-export const getAnchorConnection = async () => {
+export const getAnchorConnection = async ():Promise<[anchor.AnchorProvider, anchor.web3.Keypair]> => {
   const connection = new Connection(process.env.SOLANA_PROVIDER_URL!, 'confirmed');
   const keypair =  await GetSolWalletKeyPairFromMnemonic(process.env.MNEMONIC!);
   // const keypair = Keypair.generate();
@@ -54,7 +54,7 @@ export const getAnchorConnection = async () => {
       },
   );
   console.log("loaded wallet:",wallet.publicKey.toBase58());
-  return provider;
+  return [provider, keypair];
     
 };
 
@@ -134,7 +134,7 @@ export const getReceiveMessagePdas = async (
   console.log("instructions", i);
   const tx =  new Transaction();
   tx.add(i);
-  tx.feePayer= (new PublicKey(process.env.SOLANA_USER_ADDRESS!));
+  tx.feePayer= (new PublicKey(process.env.SOLANA_FEE_PAYER_USER_ADDRESS!));
   const simR = await messageTransmitterProgram.provider.connection.simulateTransaction(
   tx,
   );
@@ -235,7 +235,7 @@ function solanaAddressDerivationPath(index: bigint): string {
 
 export async function GetSolWalletKeyPairFromMnemonic(
   mnemonic: string,
-  passphrase?: string | undefined
+  passphrase?: string | undefined,
 ):Promise<Keypair> {
   const seed: Buffer = await bip39.mnemonicToSeed(mnemonic, passphrase)
   const derivedSeed = ed25519.derivePath(
@@ -245,4 +245,96 @@ export async function GetSolWalletKeyPairFromMnemonic(
   const keypair = Keypair.fromSeed(derivedSeed)
 
   return keypair
+}
+
+
+
+export async function CreateAtaAccountInstruction(provider:anchor.AnchorProvider,keypair:anchor.web3.Keypair, mint:string, receiverSolanaAddress:string)
+:Promise<anchor.web3.TransactionInstruction> {
+  const mintAddress = new PublicKey(mint);
+  const receiverAccount = new PublicKey(receiverSolanaAddress)
+    console.log("receiverAccount: ", receiverAccount);
+    const receiverAtaAddress = await spl.getAssociatedTokenAddress(mintAddress,receiverAccount,true);
+    console.log("receiverAtaAddress: ", receiverAtaAddress);
+    return spl.createAssociatedTokenAccountInstruction(
+           keypair.publicKey,receiverAtaAddress,receiverAccount,mintAddress
+        )
+    
+}
+
+export async function CreateSplSendInstruction(provider:anchor.AnchorProvider,keypair:anchor.web3.Keypair, mint:string, senderSolanaAddress:string)
+:Promise<anchor.web3.TransactionInstruction> {
+  const mintAddress = new PublicKey(mint);
+  const senderSolanaAccount = new PublicKey(senderSolanaAddress)   
+  const senderAtaAddress = await spl.getAssociatedTokenAddress(mintAddress,senderSolanaAccount);
+  const destinationAtaAddress = await spl.getAssociatedTokenAddress(mintAddress,keypair.publicKey);
+  console.log(`Generating SPL-TOKEN send from:${senderAtaAddress} to:${destinationAtaAddress}`);  
+    return  spl.createTransferInstruction(
+      senderAtaAddress,
+      destinationAtaAddress,
+      senderSolanaAccount,
+      1,
+    )
+
+}
+
+export async function createLookupTable(authority:anchor.web3.PublicKey, payer:anchor.web3.PublicKey, recentSlot:number):Promise<[anchor.web3.TransactionInstruction,anchor.web3.PublicKey]> {
+  // Step 1 - Get a lookup table address and create lookup table instruction
+  const [lookupTableInst, lookupTableAddress] =
+      AddressLookupTableProgram.createLookupTable({
+          authority: authority,
+          payer: payer,
+          recentSlot: recentSlot,
+      });
+
+  // Step 2 - Log Lookup Table Address
+  console.log("Lookup Table Address:", lookupTableAddress.toBase58());
+
+  return [lookupTableInst, lookupTableAddress];
+}
+
+export async function addAddressesToTable(payer:anchor.web3.PublicKey, authority:anchor.web3.PublicKey, lookupTable:anchor.web3.PublicKey, addresses:anchor.web3.PublicKey[]):Promise<anchor.web3.TransactionInstruction> {
+  // Step 1 - Create Transaction Instruction
+  const addAddressesInstruction = AddressLookupTableProgram.extendLookupTable({
+      payer: payer,
+      authority: authority,
+      lookupTable: lookupTable,
+      addresses: addresses,
+  });
+  return addAddressesInstruction;
+  
+}
+
+export async function createAndSendV0Tx(provider:anchor.AnchorProvider, payer:anchor.web3.PublicKey, txInstructions: anchor.web3.TransactionInstruction[]):Promise<string> {
+  // Step 1 - Fetch Latest Blockhash
+  const latestBlockhash = await provider.connection.getLatestBlockhash('finalized');
+  console.log("   ✅ - Fetched latest blockhash. Last valid height:", latestBlockhash.lastValidBlockHeight);
+
+  // Step 2 - Generate Transaction Message
+  const messageV0 = new TransactionMessage({
+      payerKey: payer,
+      recentBlockhash: latestBlockhash.blockhash,
+      instructions: txInstructions
+  }).compileToV0Message();
+  console.log("   ✅ - Compiled transaction message");
+  let transaction = new VersionedTransaction(messageV0);
+
+  // Step 3 - Sign your transaction with the required `Signers`
+  transaction =await provider.wallet.signTransaction(transaction);
+  console.log("   ✅ - Transaction Signed");
+
+  // Step 4 - Send our v0 transaction to the cluster
+  const txid = await provider.connection.sendRawTransaction(transaction.serialize());
+  console.log("   ✅ - Transaction sent to network");
+
+  // Step 5 - Confirm Transaction 
+  const confirmation  = await provider.connection.confirmTransaction({
+    blockhash: latestBlockhash.blockhash,
+    lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+    signature: txid
+  }, 'confirmed');
+  
+  if (confirmation.value.err) { console.error("❌ - Transaction not confirmed.") }
+  console.log('🎉 Transaction succesfully confirmed!', '\n', `https://explorer.solana.com/tx/${txid}?cluster=devnet`);
+  return txid;
 }

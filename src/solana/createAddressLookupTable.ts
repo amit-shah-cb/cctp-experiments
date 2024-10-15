@@ -20,7 +20,7 @@ import 'dotenv/config';
 import { PublicKey, SystemProgram, Transaction, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
 import * as anchor from "@coral-xyz/anchor";
 import * as spl from '@solana/spl-token';
-import { CreateAtaAccountInstruction, CreateSplSendInstruction, GetSolWalletKeyPairFromMnemonic, SOLANA_USDC_ADDRESS, decodeEventNonceFromMessage, getAnchorConnection, getMessages, getPrograms, getReceiveMessagePdas } from './utils';
+import { CreateAtaAccountInstruction, CreateSplSendInstruction, GetSolWalletKeyPairFromMnemonic, SOLANA_USDC_ADDRESS, addAddressesToTable, createAndSendV0Tx, createLookupTable, decodeEventNonceFromMessage, getAnchorConnection, getMessages, getPrograms, getReceiveMessagePdas } from './utils';
 
 const main = async () => {
     const [_receiverSolanaAddress] = process.argv.slice(2);
@@ -181,10 +181,7 @@ const main = async () => {
         //     await CreateSplSendInstruction(provider,keypair,SOLANA_USDC_ADDRESS,receiverKeyPair.publicKey.toBase58())
         // ])
         .instruction()
-    const lookupTable = (await provider.connection.getAddressLookupTable(new PublicKey(process.env.ADDRESS_LOOKUP_TABLE!))).value;
-    if (!lookupTable) return;
-    console.log("   ✅ - Fetched lookup table:", lookupTable.key.toString());
-
+        
     console.log("rInstructions:")
     const blockhash = (await provider.connection.getLatestBlockhash()).blockhash;
     const messageV0 = new TransactionMessage({
@@ -195,17 +192,23 @@ const main = async () => {
                 rInstructions,
                 await CreateSplSendInstruction(provider,keypair,SOLANA_USDC_ADDRESS,receiverKeyPair.publicKey.toBase58())
             ],
-          }).compileToV0Message([lookupTable]);
+          }).compileToV0Message();
     console.log("ATL:",messageV0.addressTableLookups);
-    // console.log("AccountKeys:",messageV0.getAccountKeys().staticAccountKeys.length);
-    const vtx = new VersionedTransaction(messageV0);
-    vtx.sign([keypair,receiverKeyPair]);
-    console.log("Simulating versioned transaction with instructions:");
-    console.log(await provider.connection.simulateTransaction(vtx,{
-        sigVerify: true,
-    }));
-   
-    
+    console.log("AccountKeys:",messageV0.getAccountKeys().staticAccountKeys.length);
+    // const vtx = new VersionedTransaction(messageV0);
+    // console.log("Simulating versioned transaction with instructions:");
+    // console.log(await provider.connection.simulateTransaction(vtx));
+    const recentSlot = await provider.connection.getSlot();
+
+    if(!process.env.ADDRESS_LOOKUP_TABLE){
+        const [lutInst,lutAddress] = await createLookupTable(keypair.publicKey,keypair.publicKey,recentSlot-1);
+        await createAndSendV0Tx(provider,keypair.publicKey,[lutInst]);
+        return;
+    }
+    const lutAddress = new PublicKey(process.env.ADDRESS_LOOKUP_TABLE!);
+    const addToLutInst = await addAddressesToTable(keypair.publicKey, keypair.publicKey,lutAddress,[...messageV0.getAccountKeys().staticAccountKeys]);
+    await createAndSendV0Tx(provider,keypair.publicKey,[addToLutInst]);
+
 
     //TODO: for now simulate both keys signing this tx but in production only the receiver should sign first
     //then send to BE
@@ -223,8 +226,8 @@ const main = async () => {
     // vtx.addSignature(mintKey.publicKey, extraSignature);
     // vtx.sign([keypair]);
 
-    const sendAndReceive = await provider.connection.sendRawTransaction(vtx.serialize());
-    console.log(sendAndReceive);
+    // const sendAndReceive = await provider.connection.sendRawTransaction(vtx.serialize());
+    // console.log(sendAndReceive);
         
     //TODO: make this 3 instructions
     /*
